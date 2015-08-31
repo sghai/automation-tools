@@ -460,6 +460,118 @@ def setup_foreman_discovery():
     run('rm -rf {0}'.format(template_file))
 
 
+def prepare_setup_with_provisioning():
+    """Task to configure all entities required for provisioning"""
+    org_name = "satelliteorg"
+    loc_name = "satelliteloc"
+    host = env['host']
+    product_name = "rhel"
+    repo_name = "rhel67"
+    repo_url = os.environ['RHEL6_URL']
+    cv_name = "cv_rhel67"
+    lc_env = "DEV"
+    ak_name = "sat_ak"
+    domain_name = "Satellitelab"
+    subnet_name = "Satellite_libvirt"
+    resource_name = "libvirt_resource"
+    hg_name = "sat_hostgroup"
+    templates = ["Kickstart default PXELinux", "Satellite Kickstart Default"]
+    admin_password = os.environ.get('ADMIN_PASSWORD', 'changeme')
+    run('hammer -u admin -p {0} organization create --name {1}'
+        .format(admin_password, org_name))
+    run('hammer -u admin -p {0} location create --name {1}'
+        .format(admin_password, loc_name))
+    run('hammer -u admin -p {0} location add-organization --name {1} '
+        '--organization {2}'.format(admin_password, loc_name, org_name))
+    run('hammer -u admin -p {0} lifecycle-environment create --name {1} '
+        '--prior "Library" --organization {2}'
+        .format(admin_password, lc_env, org_name))
+    run('hammer -u admin -p {0} product create --name {1} --organization {2}'
+        .format(admin_password, product_name, org_name))
+    run('hammer -u admin -p {0} repository create --name {1} --product {3} '
+        '--url {4} --organization {5}'
+        .format(admin_password, repo_name, product_name, repo_url, org_name))
+    run('hammer -u admin -p {0} repository synchronize --name {0} '
+        '--product {1} --organization {2}'
+        .format(admin_password, repo_name, product_name, org_name))
+    run('hammer -u admin -p {0} content-view create --name {1} --organization '
+        '{2}'.format(admin_password, cv_name, org_name))
+    run('hammer -u admin -p {0} content-view create --name {1} --organization '
+        '{2}'.format(admin_password, cv_name, org_name))
+    run('hammer -u admin -p {0} content-view add-repository --repository {1} '
+        '--organization {2}'.format(admin_password, repo_name, org_name))
+    run('hammer -u admin -p {0} content-view publish --name {1} '
+        '--organization {2}'.format(admin_password, cv_name, org_name))
+    cv_info = run('hammer -u admin -p content-view info --name {1} '
+                  '--organization {2}'
+                  .format(admin_password, cv_name, org_name))
+    cv_version_id = run('{0} | grep "^Versions:" -A6 | grep "1)"| '
+                        'cut -d ":" -f2 | sed -e "s/^[ \t]*//"'
+                        .format(cv_info))
+    run('hammer -u admin -p {0} content-view version promote --id {1} '
+        '--content-view {3} --organization {4} --to-lifecycle-environment {5}'
+        .format(admin_password, cv_version_id, cv_name, org_name, lc_env))
+    proxy_id = run('hammer -u admin -p {0} --csv capsule list | cut -d "," '
+                   '-f 1 | grep -vi "id"'.format(admin_password))
+    run('hammer -u admin -p {0} location add-smart-proxy --name {1} '
+        '--smart-proxy-id {2}'.format(admin_password, loc_name, proxy_id))
+    run('hammer -u admin -p {0} organization add-smart-proxy --name {1} '
+        '--smart-proxy-id {2}'.format(admin_password, org_name, proxy_id))
+    run('hammer -u admin -p {0} domain create --name {1} --dns-id {2} '
+        '--organization {3} --location {4}'
+        .format(admin_password, domain_name, proxy_id, org_name, loc_name))
+    # No discovery option BZ 1223124
+    run('hammer -u admin -p {0} subnet create --name {1} --domains {2} '
+        '--dns-id {3} --dhcp-id {3} --tftp-id {3} --network "192.168.100.0" '
+        '--mask "255.255.255.0" --locations {4} --organizations {5}'
+        .format(admin_password, subnet_name, domain_name, proxy_id,
+                loc_name, org_name))
+    run('hammer -u admin -p {0} compute-resource create --name {1} --provider '
+        '"Libvirt" --set-console-password "no" '
+        '--url="qemu+tcp://{2}:16509/system" --locations {3} --organizations '
+        '{4}'.format(admin_password, resource_name, host, loc_name, org_name))
+    os_ids = run('hammer -u admin -p {0} --csv os list | cut -d "," -f1 '
+                 '| grep -vi "^id"'.format(admin_password))
+    for template in templates:
+        for os_id in os_ids:
+            run('hammer -u admin -p {0} template add-operatingsystem --name '
+                '{1} --operatingsystem-id {2}'
+                .format(admin_password, template, os_id))
+            run('hammer -u admin -p {0} os add-ptable --id {1} '
+                '--partition-table="Kickstart default"'
+                .format(admin_password, os_id))
+    pxe_temp_id = run('hammer -u admin -p {0} --csv template info --name '
+                      '"Kickstart default PXELinux" | cut -d "," -f1 | '
+                      'grep -vi "^id"'.format(admin_password))
+    provisioning_temp_id = run('hammer -u admin -p {0} --csv template info '
+                               '--name "Satellite Kickstart Default" '
+                               '| cut -d "," -f1 | grep -vi "^id"'
+                               .format(admin_password))
+    for os_id in os_ids:
+        for temp_id in [pxe_temp_id, provisioning_temp_id]:
+            run('hammer -u admin -p {0} os set-default-template --id {1} '
+                '--config-template-id {3}'
+                .format(admin_password, os_id, temp_id))
+    medium = run('hammer -u admin -p {0} --csv medium list | cut -d "," -f2 '
+                 '| grep -i RHEL67_x86_64'.format(admin_password))
+    run('hammer -u admin -p {0}  hostgroup create --name {1} '
+        '--content-view {2} --lifecycle-environment {4} '
+        '--content-source-id {5} --puppet-proxy {6} --puppet-ca-proxy '
+        '{6} --organizations {7} --domain {8} --subnet '
+        '{9} --architecture "x86_64" '
+        '--operatingsystem="RedHat 6.7" '
+        '--medium  {10}'
+        '--partition-table="Kickstart default" --locations {11}'
+        .format(admin_password, hg_name, cv_name, lc_env, proxy_id, host,
+                org_name, domain_name, subnet_name, medium, loc_name))
+    run('hammer -u admin -p {0} activation-key create --name {1} '
+        '--organization {2} --content-view {3} --lifecycle-environment {4}'
+        .format(admin_password, ak_name, org_name, cv_name, lc_env))
+    run('hammer -u admin -p {0}  hostgroup set-parameter --hostgroup {1}'
+        ' --name="kt_activation_keys" --value "ak_name"'
+        .format(admin_password, hg_name))
+
+
 def vm_create():
     """Task to create a VM using snap-guest based on a ``SOURCE_IMAGE`` base
     image.
