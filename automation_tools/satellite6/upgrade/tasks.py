@@ -300,7 +300,7 @@ def create_rhevm_instance(instance_name, template_name, datacenter='Default',
                 vm_fqdn = rhevm_client.vms.get(
                     name=instance_name).get_guest_info().get_fqdn()
                 print('\t Instance FQDN : %s' % (vm_fqdn))
-                return vm_fqdn
+                run('export SAT_INSTANCE_FQDN={0}'.format(vm_fqdn))
     rhevm_client.disconnect()
 
 
